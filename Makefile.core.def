@@ -1,0 +1,4 @@
+module = {
+  name = vmsnap;
+  common = commands/vmware-snapshot.c;
+};
