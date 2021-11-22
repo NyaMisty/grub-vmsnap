@@ -42,16 +42,16 @@ static grub_extcmd_t cmd_vmsnap;
 
 static const struct grub_arg_option options[] =
 {
-	{"set", 0, 0, N_("Save read value into variable VARNAME."),
-	N_("VARNAME"), ARG_TYPE_STRING},
-	{0, 0, 0, 0, 0, 0}
+    {"set", 0, 0, N_("Save read value into variable VARNAME."),
+    N_("VARNAME"), ARG_TYPE_STRING},
+    {0, 0, 0, 0, 0, 0}
 };
 
 static void _handle_return(grub_extcmd_context_t ctxt, char *retstr){
-	if (ctxt->state[0].set)
-		grub_env_set (ctxt->state[0].arg, retstr);
-	else
-		grub_printf ("%s\n", retstr);
+    if (ctxt->state[0].set)
+        grub_env_set (ctxt->state[0].arg, retstr);
+    else
+        grub_printf ("%s\n", retstr);
 }
 static char *FIND(char *buf, const char* str) {
     char *temp = grub_strstr(buf, str);
@@ -60,34 +60,95 @@ static char *FIND(char *buf, const char* str) {
 //#define FIND(buf, str) (strstr(buf, str) + grub_strlen(grub_strlen(str)))
 #define CMPHEAD(buf, head) (grub_strncmp(buf, head, grub_strlen(head)))
 
-static char *extract_config_val(char *buf) {
-	char *beg = FIND(buf, " = \"");
-	if (!beg)
-		return NULL;
-	char *end = grub_strrchr(buf, '"');
-	if (!end)
-		return NULL;
-	*end = 0;
-	return beg;
+static char *extract_config_val(char *buf, const char *startstr, const char endchar) {
+    char *beg = FIND(buf, startstr);
+    if (!beg)
+        return NULL;
+    char *end = grub_strrchr(buf, endchar);
+    if (!end)
+        return NULL;
+    *end = 0;
+    return beg;
 }
 
 /*static int extract_config_line(char *buf, char *prop, char *val) {
-	char *propend = grub_strstr(buf, " = \"");
-	if (!propend)
-		return 0;
-	
-	char *beg = propend + sizeof(" = \"") - 1;
-	char *end = grub_strrchr(buf, '"');
-	if (!end)
-		return 0;
-	*propend = 0;
-	grub_strcpy(prop, buf);
-	
-	*end = 0;
-	grub_strcpy(val, beg);
+    char *propend = grub_strstr(buf, " = \"");
+    if (!propend)
+        return 0;
+    
+    char *beg = propend + sizeof(" = \"") - 1;
+    char *end = grub_strrchr(buf, '"');
+    if (!end)
+        return 0;
+    *propend = 0;
+    grub_strcpy(prop, buf);
+    
+    *end = 0;
+    grub_strcpy(val, beg);
 
-	return 1;
+    return 1;
 }*/
+
+/* Read a line from the file FILE.  */
+char *
+grub_file_getline_mod (grub_file_t file)
+{
+  char c;
+  grub_size_t pos = 0;
+  char *cmdline;
+  int have_newline = 0;
+  grub_size_t max_len = 64;
+
+  /* Initially locate some space.  */
+  cmdline = grub_malloc (max_len);
+  if (! cmdline)
+    return 0;
+
+  while (1)
+    {
+      if (grub_file_read (file, &c, 1) != 1)
+        break;
+
+      /* Skip all carriage returns.  */
+      if (c == '\r')
+        continue;
+      
+      if (c == 0)
+        break;
+
+      if (pos + 1 >= max_len)
+        {
+          char *old_cmdline = cmdline;
+          max_len = max_len * 2;
+          cmdline = grub_realloc (cmdline, max_len);
+          if (! cmdline)
+            {
+              grub_free (old_cmdline);
+              return 0;
+            }
+        }
+
+      if (c == '\n')
+        {
+          have_newline = 1;
+          break;
+        }
+
+      cmdline[pos++] = c;
+    }
+
+  cmdline[pos] = '\0';
+
+  /* If the buffer is empty, don't return anything at all.  */
+  if (pos == 0 && !have_newline)
+    {
+      grub_free (cmdline);
+      cmdline = 0;
+    }
+
+  return cmdline;
+}
+
 
 #define DEBUG(...) grub_dprintf("vmsd", __VA_ARGS__)
 //#define DEBUG_REFRESH() do{ void *cmdl = grub_cmdline_get("Continue?"); grub_free(cmdl); grub_refresh(); } while(0)
@@ -96,194 +157,172 @@ static grub_err_t
 grub_cmd_vmsnap (grub_extcmd_context_t ctxt, int argc, char **argv)
 {
 
-	if (argc != 1)
-		return grub_error (GRUB_ERR_BAD_ARGUMENT, N_("filename expected"));
+    if (argc != 1)
+        return grub_error (GRUB_ERR_BAD_ARGUMENT, N_("filename expected"));
 
-	grub_errno = GRUB_ERR_NONE;
-	
-	char vmxpath[256]; grub_strcpy(vmxpath, argv[0]);
-	DEBUG("Got vmxpath: %s\n", vmxpath);
-	char vmsdpath[256];
+    grub_errno = GRUB_ERR_NONE;
+    
+    char vmxpath[256]; char vmxdir[256]; char temppath[256];
+    
     {
-        grub_strcpy(vmsdpath, vmxpath);
-        char *ret = grub_strrchr(vmsdpath, '.');
-        if (!ret)
-            return grub_error (GRUB_ERR_BAD_ARGUMENT, "invalid vmx path");
-        
-        *ret = 0;
-        grub_strcpy(vmsdpath + grub_strlen(vmsdpath), ".vmsd");
+        grub_strcpy(vmxpath, argv[0]);
+        DEBUG("Got vmxpath: %s\n", vmxpath);
+        {
+            grub_strcpy(vmxdir, vmxpath);
+            
+            char *ret = grub_strrchr(vmxdir, '/');
+            if (!ret)
+                return grub_error (GRUB_ERR_BAD_ARGUMENT, "invalid vmx path");
+            
+            *(ret+1) = 0;
+        }
+        grub_strcpy(temppath, vmxdir);
+        DEBUG("Got vmxdir: %s\n", temppath);
     }
-	DEBUG("Got vmsdpath: %s\n", vmsdpath);
-	DEBUG_REFRESH();
+    DEBUG_REFRESH();
 
-	grub_errno = GRUB_ERR_NONE;
+    grub_errno = GRUB_ERR_NONE;
 
-	DEBUG("Opening vmx file\n");
-	DEBUG_REFRESH();
-	grub_file_t vmxfile = grub_file_open(vmxpath, GRUB_FILE_TYPE_NONE | GRUB_FILE_TYPE_NO_DECOMPRESS);
-	if (!vmxfile){
-		grub_err_t temp = grub_errno;
-		grub_errno = GRUB_ERR_NONE;
-		return grub_error (temp, "Failed to open vmx file");
-	}
-		
-	DEBUG("Successfully opened vmx: %s\n", vmxpath);
-	DEBUG_REFRESH();
+    DEBUG("Opening vmx file\n");
+    DEBUG_REFRESH();
 
-	grub_errno = GRUB_ERR_NONE;
-
-    char *buf = NULL;
     char curdisk[256] = { 0 };
-    while (grub_free (buf), (buf = grub_file_getline (vmxfile))) {
-		DEBUG("Got line: %s\n", buf);
-        char *lineStart = buf;
-        if (!FIND(buf, ".fileName = \"")) {
-            continue;
+    {
+        grub_file_t vmxfile = grub_file_open(vmxpath, GRUB_FILE_TYPE_NONE | GRUB_FILE_TYPE_NO_DECOMPRESS);
+        if (!vmxfile){
+            grub_err_t temp = grub_errno;
+            grub_errno = GRUB_ERR_NONE;
+            return grub_error (temp, "Failed to open vmx file");
         }
-        if ( !(!CMPHEAD(lineStart, "ide") || !CMPHEAD(lineStart, "sata") || !CMPHEAD(lineStart, "scsi") || !CMPHEAD(lineStart, "nvme")) ) {
-            continue;
+    
+        DEBUG("Successfully opened vmx: %s\n", vmxpath);
+        DEBUG_REFRESH();
+    
+        grub_errno = GRUB_ERR_NONE;
+
+        char *buf = NULL;
+        while (grub_free (buf), (buf = grub_file_getline (vmxfile))) {
+            DEBUG("Got line: %s\n", buf);
+            DEBUG_REFRESH();
+            char *lineStart = buf;
+            if (!FIND(buf, ".fileName = \"")) {
+                continue;
+            }
+            if ( !(!CMPHEAD(lineStart, "ide") || !CMPHEAD(lineStart, "sata") || !CMPHEAD(lineStart, "scsi") || !CMPHEAD(lineStart, "nvme")) ) {
+                continue;
+            }
+            char *filename = extract_config_val(lineStart, " = \"", '"');
+            if (!grub_memcmp(filename + grub_strlen(filename) - 3, "iso", 3) 
+                || !grub_memcmp(filename + grub_strlen(filename) - 3, "flp", 3) ) {
+                continue;
+            }
+            grub_strcpy(curdisk, filename);
+            break;
         }
-        char *filename = extract_config_val(lineStart);
-        if (!grub_memcmp(filename + grub_strlen(filename) - 3, "iso", 3) 
-            || !grub_memcmp(filename + grub_strlen(filename) - 3, "flp", 3) ) {
-            continue;
-        }
-        grub_strcpy(curdisk, filename);
-        break;
+        grub_errno = GRUB_ERR_NONE;
+        grub_file_close(vmxfile);
+        DEBUG("Closed vmxfile\n");
     }
 
-	if (!grub_strlen(curdisk))
-		return grub_error (1, N_("invalid vmx contains no disk"));  
-
-	grub_errno = GRUB_ERR_NONE;
-	grub_file_close(vmxfile);
-	DEBUG("Closed vmxfile");
+    if (!grub_strlen(curdisk))
+        return grub_error (1, N_("invalid vmx contains no disk"));  
 
     grub_printf("Got disk in vmx file: %s\n", curdisk);
-	DEBUG_REFRESH();
+    DEBUG_REFRESH();
+    //return GRUB_ERR_NONE;
 
-	grub_errno = GRUB_ERR_NONE;
+    grub_errno = GRUB_ERR_NONE;
+    
 
-	grub_file_t vmsdfile = grub_file_open(vmsdpath, GRUB_FILE_TYPE_NONE | GRUB_FILE_TYPE_NO_DECOMPRESS);
-    if (!vmsdfile) {
-		_handle_return(ctxt, curdisk);
-		return GRUB_ERR_NONE;
-	}
-	DEBUG("Successfully opened vmsd: %s\n", vmsdpath);
-	DEBUG_REFRESH();
-
-	// has vmsd file
-	struct SNAPSHOT {
-		char entry[20];
-		char uid[8];
-		char diskname[256];
-		char displayname[256];
-		char parent[8];
-	} snapshots[MAX_SNAPSHOT_NUM] = { 0 };
-	int cur_index = -1;
-	char currentUid[8] = { 0 };
-	while (grub_free (buf), (buf = grub_file_getline (vmsdfile))) {
-        if (!CMPHEAD(buf, "snapshot.")) { // general configs
-			if (!!CMPHEAD(buf, "snapshot.current")) {
-				continue;
-			}
-			char *ret = extract_config_val(buf);
-			if (ret){
-				grub_strcpy(currentUid, extract_config_val(buf));
-			}
-            DEBUG("Found snapshot.current: %s\n", currentUid);
-			continue;
-		}
-		else if (!CMPHEAD(buf, "snapshot") && grub_isdigit(buf[8])) { // things like snapshotXX.XXX
-			//puts(buf);
-            char *pDot = grub_strchr(buf, '.');
-			*pDot = 0;
-			if (cur_index == -1 || !!grub_strcmp(buf, snapshots[cur_index].entry)) {
-				cur_index++;
-				grub_strcpy(snapshots[cur_index].entry, buf);
-                DEBUG("Enter new snapshot entry: %s\n", buf);
-				DEBUG_REFRESH();
-			}
-			
-			char *propStart = pDot + 1;
-			//char propName[20] = { 0 };
-
-			char *ret = extract_config_val(propStart);
-            if (!ret)
-                continue;
-			
-			if (!CMPHEAD(propStart, "disk0.fileName = ")) {
-				grub_strcpy(snapshots[cur_index].diskname, ret);
-			} else if (!CMPHEAD(propStart, "uid = ")) {
-				grub_strcpy(snapshots[cur_index].uid, ret);
-			} else if (!CMPHEAD(propStart, "displayName = ")) {
-				grub_strcpy(snapshots[cur_index].displayname, ret);
-			} else if (!CMPHEAD(propStart, "parent = ")) {
-				grub_strcpy(snapshots[cur_index].parent, ret);
-			} else {
-				continue;
-			}
-		} else {
-			continue;
-		}
-	}
-	DEBUG_REFRESH();
-	grub_errno = GRUB_ERR_NONE;
-	grub_file_close(vmsdfile);
-	DEBUG("Closed vmxfile");
-
-
-	grub_errno = GRUB_ERR_NONE;
-	
-    // debug printting
-    for (int i = 0; i <= cur_index; i++) {
-        grub_printf("Found node entry: %s uid: %s, parent: %s, name: %s, disk: %s\n",
-                    snapshots[i].entry, snapshots[i].uid, snapshots[i].parent, snapshots[i].displayname, snapshots[i].diskname);
+    char disks[20][256] = { 0 };
+    int disk_num = 0;
+    char cursubdisk[256]; grub_strcpy(cursubdisk, curdisk);
+    {
+        for (disk_num = 0; disk_num < 20; disk_num++) {
+            grub_strcpy(temppath + grub_strlen(vmxdir), cursubdisk);
+            grub_printf("processing disk file %s\n", temppath);
+            DEBUG_REFRESH();
+            grub_file_t curdiskfile = grub_file_open(temppath, GRUB_FILE_TYPE_NONE | GRUB_FILE_TYPE_NO_DECOMPRESS);
+            if (!curdiskfile) {
+                grub_printf("can't find disk!\n");
+                grub_error (1, N_("can't find disk!"));
+                return GRUB_ERR_NONE;
+            }
+            grub_file_seek(curdiskfile, 0x200);
+            char *buf = NULL;
+            char parentdisk[256] = { 0 };
+            int ln = 0;
+            while (grub_free (buf), (buf = grub_file_getline_mod (curdiskfile))) {
+                DEBUG("Got disk info line: %s\n", buf);
+                DEBUG_REFRESH();
+                ln++;
+                char *lineStart = buf;
+                if (!!CMPHEAD(lineStart, "parentFileNameHint=")) {
+                    continue;
+                }
+                char *filename = extract_config_val(lineStart, "=\"", '"');
+                grub_strcpy(parentdisk, filename);
+                DEBUG("Got new disk on ln %d: %s\n", ln, parentdisk);
+                break;
+            }
+            
+            grub_errno = GRUB_ERR_NONE;
+            grub_file_close(curdiskfile);
+    
+            grub_strcpy(disks[disk_num], cursubdisk);
+            grub_strcpy(cursubdisk, parentdisk);
+        
+            if (!grub_strlen(parentdisk))
+                break;
+        }
+        if (disk_num == 20) {
+            grub_printf("Toooo many disks (> 20)\n");
+            return grub_error (1, "Toooo many disks (> 20)");
+        }
+        disk_num++;
     }
-	DEBUG_REFRESH();
+    
+    DEBUG("Finished processing disks\n");
+    DEBUG_REFRESH();
+
+    grub_errno = GRUB_ERR_NONE;
+    
+    grub_printf("Found %d disks: ", disk_num);
+    // debug printting
+    for (int i = 0; i < disk_num; i++) {
+        grub_printf("%s ", disks[i]);
+        DEBUG_REFRESH();
+    }
+    grub_printf("\n");
+    DEBUG_REFRESH();
     
     // go through the chain
-    char disks[MAX_RET_BUF]; char *disksend = disks + sizeof(disks);
-    disksend -= grub_strlen(curdisk) + 1;
-    grub_strcpy(disksend, curdisk);
+    char diskret[MAX_RET_BUF]; char *diskretend = diskret + sizeof(diskret);
     
-	DEBUG_REFRESH();
-    char cur[8]; grub_strcpy(cur, currentUid);
-    while (1) {
-        int i;
-        for (i = 0; i <= cur_index; i++) {
-            if (!!grub_strcmp(snapshots[i].uid, cur)) 
-                continue;
-            break;
-        }
-        if (i == cur_index + 1) {
-            return grub_error (1, N_("can't find target snapshot in chain"));
-        }
-        // found current node
-        grub_printf("Cur nodes uid: %s, name: %s, disk: %s\n", cur, snapshots[i].displayname, snapshots[i].diskname);
-        int len = grub_strlen(snapshots[i].diskname);
-        disksend -= len + 1;
-        grub_memcpy(disksend, snapshots[i].diskname, len);
-        disksend[len] = ' ';
-        grub_strcpy(cur, snapshots[i].parent);
-        if (!grub_strcmp(snapshots[i].parent, ""))
-            // completed
-            break;
+    DEBUG_REFRESH();
+    //for (int i = disk_num - 1; i >= 0; i--) {
+    for (int i = 0; i < disk_num; i++) {
+        DEBUG("Outputting disks: %s\n", disks[i]);
+        DEBUG_REFRESH();
+        int len = grub_strlen(disks[i]);
+        diskretend -= len + 1;
+        grub_memcpy(diskretend, disks[i], len);
+        diskretend[len] = ' ';
     }
-	DEBUG_REFRESH();
-    disks[sizeof(disks) - 1] = 0;
-    _handle_return(ctxt, disksend);
-	return GRUB_ERR_NONE;
+    DEBUG_REFRESH();
+    diskret[sizeof(diskret) - 1] = 0;
+    _handle_return(ctxt, diskretend);
+    return GRUB_ERR_NONE;
 }
 
 GRUB_MOD_INIT(vmsnap)
 {
-	cmd_vmsnap = grub_register_extcmd ("vmsnap", grub_cmd_vmsnap, 0, N_("VMXPATH"),
-					 N_("Parse vmx and vmsd to get snapshot disks"),
-					 options);
+    cmd_vmsnap = grub_register_extcmd ("vmsnap", grub_cmd_vmsnap, 0, N_("VMXPATH"),
+                     N_("Parse vmx and vmsd to get snapshot disks"),
+                     options);
 }
 
 GRUB_MOD_FINI(vmsnap)
 {
-	grub_unregister_extcmd (cmd_vmsnap);
+    grub_unregister_extcmd (cmd_vmsnap);
 }

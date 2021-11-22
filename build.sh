@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/bash
 SCRIPT=$(realpath $0)
 ORIG=$(dirname $SCRIPT)
 DEST=$(realpath .)
